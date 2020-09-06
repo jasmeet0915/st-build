@@ -50,10 +50,6 @@ typedef struct {
 #define XK_NO_MOD     0
 #define XK_SWITCH_MOD (1<<13)
 
-/* alpha */
-#define OPAQUE 0Xff
-#define USE_ARGB (alpha != OPAQUE && opt_embed == NULL)
-
 /* function definitions used in config.h */
 static void clipcopy(const Arg *);
 static void clippaste(const Arg *);
@@ -64,8 +60,10 @@ static void zoomabs(const Arg *);
 static void zoomreset(const Arg *);
 static void ttysend(const Arg *);
 
-/* config.h for applying patches and the configuration. */
-#include "config.h"
+/* config.def.h for applying patches and the configuration. */
+/* patches are applied to config.def.h so you have to include it instead of config.h*/
+//#include "config.h"
+#include "config.def.h"
 
 /* XEMBED messages */
 #define XEMBED_FOCUS_IN  4
@@ -248,6 +246,7 @@ static char *usedfont = NULL;
 static double usedfontsize = 0;
 static double defaultfontsize = 0;
 
+static char *opt_alpha = NULL;
 static char *opt_class = NULL;
 static char **opt_cmd  = NULL;
 static char *opt_embed = NULL;
@@ -801,12 +800,11 @@ xloadcols(void)
 		}
 
 	/* set alpha value of bg color */
-	if (USE_ARGB) {
-		dc.col[defaultbg].color.alpha = alpha << 8;
-		dc.col[defaultbg].color.red   = ((dc.col[defaultbg].color.red >> 8) * alpha / 255) << 8;
-		dc.col[defaultbg].color.green = ((dc.col[defaultbg].color.green >> 8) * alpha / 255) << 8;
-		dc.col[defaultbg].color.blue  = ((dc.col[defaultbg].color.blue >> 8) * alpha / 255) << 8;
-	}
+	if (opt_alpha)
+		alpha = strtof(opt_alpha, NULL);
+	dc.col[defaultbg].color.alpha = (unsigned short)(0xffff * alpha);
+	dc.col[defaultbg].pixel &= 0x00FFFFFF;
+	dc.col[defaultbg].pixel |= (unsigned char)(0xff * alpha) << 24;
 	loaded = 1;
 }
 
@@ -825,17 +823,6 @@ xsetcolorname(int x, const char *name)
 	dc.col[x] = ncolor;
 
 	return 0;
-}
-
-void
-xtermclear(int col1, int row1, int col2, int row2)
-{
-	XftDrawRect(xw.draw,
-			&dc.col[IS_SET(MODE_REVERSE) ? defaultfg : defaultbg],
-			borderpx + col1 * win.cw,
-			borderpx + row1 * win.ch,
-			(col2-col1+1) * win.cw,
-			(row2-row1+1) * win.ch);
 }
 
 /*
@@ -1127,44 +1114,23 @@ xinit(int cols, int rows)
 	Window parent;
 	pid_t thispid = getpid();
 	XColor xmousefg, xmousebg;
+	XWindowAttributes attr;
+	XVisualInfo vis;
 
 	if (!(xw.dpy = XOpenDisplay(NULL)))
 		die("can't open display\n");
 	xw.scr = XDefaultScreen(xw.dpy);
-	xw.depth = (USE_ARGB) ? 32: XDefaultDepth(xw.dpy, xw.scr);
-	if (!USE_ARGB)
-		xw.vis = XDefaultVisual(xw.dpy, xw.scr);
-	else {
-		XVisualInfo *vis;
-		XRenderPictFormat *fmt;
-		int nvi;
-		int i;
 
-		XVisualInfo tpl = {
-			.screen = xw.scr,
-			.depth = 32,
-			.class = TrueColor
-		};
-
-		vis = XGetVisualInfo(xw.dpy,
-				VisualScreenMask | VisualDepthMask | VisualClassMask,
-				&tpl, &nvi);
-		xw.vis = NULL;
-		for (i = 0; i < nvi; i++) {
-			fmt = XRenderFindVisualFormat(xw.dpy, vis[i].visual);
-			if (fmt->type == PictTypeDirect && fmt->direct.alphaMask) {
-				xw.vis = vis[i].visual;
-				break;
-			}
-		}
-
-		XFree(vis);
-
-		if (!xw.vis) {
-			fprintf(stderr, "Couldn't find ARGB visual.\n");
-			exit(1);
-		}
+	if (!(opt_embed && (parent = strtol(opt_embed, NULL, 0)))) {
+		parent = XRootWindow(xw.dpy, xw.scr);
+		xw.depth = 32;
+	} else {
+		XGetWindowAttributes(xw.dpy, parent, &attr);
+		xw.depth = attr.depth;
 	}
+
+	XMatchVisualInfo(xw.dpy, xw.scr, xw.depth, TrueColor, &vis);
+	xw.vis = vis.visual;
 
 	/* font */
 	if (!FcInit())
@@ -1174,11 +1140,7 @@ xinit(int cols, int rows)
 	xloadfonts(usedfont, 0);
 
 	/* colors */
-	if (!USE_ARGB)
-		xw.cmap = XDefaultColormap(xw.dpy, xw.scr);
-	else
-		xw.cmap = XCreateColormap(xw.dpy, XRootWindow(xw.dpy, xw.scr),
-				xw.vis, None);
+	xw.cmap = XCreateColormap(xw.dpy, parent, xw.vis, None);
 	xloadcols();
 
 	/* adjust fixed window geometry */
@@ -1198,8 +1160,6 @@ xinit(int cols, int rows)
 		| ButtonMotionMask | ButtonPressMask | ButtonReleaseMask;
 	xw.attrs.colormap = xw.cmap;
 
-	if (!(opt_embed && (parent = strtol(opt_embed, NULL, 0))))
-		parent = XRootWindow(xw.dpy, xw.scr);
 	xw.win = XCreateWindow(xw.dpy, parent, xw.l, xw.t,
 			win.w, win.h, 0, xw.depth, InputOutput,
 			xw.vis, CWBackPixel | CWBorderPixel | CWBitGravity
@@ -1208,8 +1168,7 @@ xinit(int cols, int rows)
 	memset(&gcvalues, 0, sizeof(gcvalues));
 	gcvalues.graphics_exposures = False;
 	xw.buf = XCreatePixmap(xw.dpy, xw.win, win.w, win.h, xw.depth);
-	dc.gc = XCreateGC(xw.dpy, (USE_ARGB) ? xw.buf: parent,
-			GCGraphicsExposures, &gcvalues);
+	dc.gc = XCreateGC(xw.dpy, xw.buf, GCGraphicsExposures, &gcvalues);
 	XSetForeground(xw.dpy, dc.gc, dc.col[defaultbg].pixel);
 	XFillRectangle(xw.dpy, xw.buf, dc.gc, 0, 0, win.w, win.h);
 
@@ -2047,6 +2006,9 @@ main(int argc, char *argv[])
 	ARGBEGIN {
 	case 'a':
 		allowaltscreen = 0;
+		break;
+	case 'A':
+		opt_alpha = EARGF(usage());
 		break;
 	case 'c':
 		opt_class = EARGF(usage());
